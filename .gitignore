@@ -1,0 +1,9 @@
+.build/
+rust-core/target/
+.DS_Store
+*.xcuserdata
+*.xcworkspace
+*.xcodeproj
+DerivedData/
+.swiftpm/
+Package.resolved

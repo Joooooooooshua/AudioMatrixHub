@@ -1,0 +1,51 @@
+name: Cross-Platform Rust Core & macOS Swift CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  rust-core-cross-platform:
+    name: Rust Core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build & test Rust C-ABI engine
+        run: cargo test --release --manifest-path rust-core/Cargo.toml
+
+  macos-app-and-self-test:
+    name: macOS SwiftUI + Rust FFI Self-Test
+    runs-on: macos-15
+    needs: rust-core-cross-platform
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show Swift & Rust toolchains
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Build Rust static library (C-ABI)
+        run: cargo build --release --manifest-path rust-core/Cargo.toml
+
+      - name: Build Swift + Rust FFI release targets
+        run: swift build -c release
+
+      - name: Run self-test suite
+        run: ./.build/release/audiomatrix self-test

@@ -1,4 +1,4 @@
-name: Cross-Platform Rust Core & macOS Swift CI
+name: Cross-Platform Build, Test & Release Artifacts CI
 
 on:
   push:
@@ -7,27 +7,45 @@ on:
     branches: [ main ]
 
 jobs:
-  rust-core-cross-platform:
-    name: Rust Core (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, ubuntu-latest, windows-latest]
+  linux-x64:
+    name: Linux (PipeWire + Rust eframe GUI)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install X11 / Wayland / OpenGL dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libgl1-mesa-dev libwayland-dev pkg-config
+
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build & test Rust C-ABI engine
+      - name: Test Rust Core (PipeWire driver + DSP + RingBuffer)
         run: cargo test --release --manifest-path rust-core/Cargo.toml
 
-  macos-app-and-self-test:
-    name: macOS SwiftUI + Rust FFI Self-Test
-    runs-on: macos-15
-    needs: rust-core-cross-platform
+      - name: Build Linux Desktop GUI & CLI
+        run: cargo build --release --manifest-path rust-desktop/Cargo.toml
+
+      - name: Run cross-platform self-test suite
+        run: ./rust-desktop/target/release/audiomatrix-pc self-test
+
+      - name: Package Linux Release Tarball
+        run: |
+          mkdir -p dist/linux
+          cp rust-desktop/target/release/audiomatrix-desktop rust-desktop/target/release/audiomatrix-pc README.md README.zh-CN.md LICENSE dist/linux/
+          tar -czf AudioMatrixHub-v2.0.0-Linux-x64.tar.gz -C dist/linux .
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioMatrixHub-v2.0.0-Linux-x64
+          path: AudioMatrixHub-v2.0.0-Linux-x64.tar.gz
+
+  windows-x64:
+    name: Windows (WASAPI + Rust eframe GUI)
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,17 +53,46 @@ jobs:
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Show Swift & Rust toolchains
+      - name: Test Rust Core (WASAPI driver + DSP + RingBuffer)
+        run: cargo test --release --manifest-path rust-core/Cargo.toml
+
+      - name: Build Windows Desktop GUI & CLI
+        run: cargo build --release --manifest-path rust-desktop/Cargo.toml
+
+      - name: Run cross-platform self-test suite
+        run: .\rust-desktop\target\release\audiomatrix-pc.exe self-test
+
+      - name: Package Windows Release Zip
         run: |
-          swift --version
-          rustc --version
-          cargo --version
+          New-Item -ItemType Directory -Force -Path dist\win | Out-Null
+          Copy-Item rust-desktop\target\release\audiomatrix-desktop.exe dist\win\
+          Copy-Item rust-desktop\target\release\audiomatrix-pc.exe dist\win\
+          Copy-Item README.md, README.zh-CN.md, LICENSE dist\win\
+          Compress-Archive -Path dist\win\* -DestinationPath AudioMatrixHub-v2.0.0-Windows-x64.zip -Force
 
-      - name: Build Rust static library (C-ABI)
-        run: cargo build --release --manifest-path rust-core/Cargo.toml
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioMatrixHub-v2.0.0-Windows-x64
+          path: AudioMatrixHub-v2.0.0-Windows-x64.zip
 
-      - name: Build Swift + Rust FFI release targets
+  macos-arm64:
+    name: macOS (CoreAudio + SwiftUI FFI & Rust Desktop)
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test & build Rust C-ABI Core
+        run: |
+          cargo test --release --manifest-path rust-core/Cargo.toml
+          cargo build --release --manifest-path rust-core/Cargo.toml
+
+      - name: Build SwiftUI + Rust FFI macOS targets
         run: swift build -c release
 
-      - name: Run self-test suite
+      - name: Run macOS CoreAudio + Rust FFI self-test suite
         run: ./.build/release/audiomatrix self-test

@@ -6,7 +6,9 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![macOS 14+](https://img.shields.io/badge/macOS-14.0%2B-0A84FF?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![macOS 14+](https://img.shields.io/badge/macOS-SwiftUI%20%2B%20CoreAudio-0A84FF?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Windows](https://img.shields.io/badge/Windows-WASAPI%20%2B%20eframe-0078D4?style=flat-square&logo=windows&logoColor=white)](#windows--linux-桌面端编译与运行-rust-eframe)
+[![Linux](https://img.shields.io/badge/Linux-PipeWire%20%2B%20eframe-FCC624?style=flat-square&logo=linux&logoColor=black)](#windows--linux-桌面端编译与运行-rust-eframe)
 [![Rust 2021](https://img.shields.io/badge/Rust-C--ABI%20Core-000000?style=flat-square&logo=rust&logoColor=white)](rust-core/)
 [![Swift 5.10+](https://img.shields.io/badge/Swift-5.10%2B-F05138?style=flat-square&logo=swift&logoColor=white)](https://swift.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-34C759?style=flat-square)](LICENSE)
@@ -132,6 +134,19 @@ audiomatrix self-test
 
 # 启动菜单栏控制中心
 open -a /Applications/AudioMatrixHub.app
+```
+
+### Windows & Linux 桌面端编译与运行 (`Rust eframe`)
+
+```bash
+# 编译无 WebView 原生桌面控制中心 (`audiomatrix-desktop`) 与 CLI (`audiomatrix-pc`)
+cargo build --release --manifest-path rust-desktop/Cargo.toml
+
+# 运行 6 项跨平台系统驱动与 DSP 自检
+./rust-desktop/target/release/audiomatrix-pc self-test
+
+# 启动跨平台桌面控台窗口（Windows 调用 WASAPI / Linux 调用 PipeWire）
+./rust-desktop/target/release/audiomatrix-desktop
 ```
 
 ---

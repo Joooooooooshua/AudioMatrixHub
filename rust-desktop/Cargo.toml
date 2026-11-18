@@ -1,0 +1,18 @@
+[package]
+name = "audiomatrix_desktop"
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+description = "Cross-platform native Rust GUI Control Center (eframe/egui) and CLI for Windows (WASAPI), Linux (PipeWire), and macOS"
+
+[[bin]]
+name = "audiomatrix-desktop"
+path = "src/main_gui.rs"
+
+[[bin]]
+name = "audiomatrix-pc"
+path = "src/main_cli.rs"
+
+[dependencies]
+audiomatrix_rust_core = { path = "../rust-core" }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }

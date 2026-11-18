@@ -6,7 +6,9 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![macOS 14+](https://img.shields.io/badge/macOS-14.0%2B-0A84FF?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![macOS 14+](https://img.shields.io/badge/macOS-SwiftUI%20%2B%20CoreAudio-0A84FF?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Windows](https://img.shields.io/badge/Windows-WASAPI%20%2B%20eframe-0078D4?style=flat-square&logo=windows&logoColor=white)](#windows--linux-desktop-gui-rust-eframe)
+[![Linux](https://img.shields.io/badge/Linux-PipeWire%20%2B%20eframe-FCC624?style=flat-square&logo=linux&logoColor=black)](#windows--linux-desktop-gui-rust-eframe)
 [![Rust 2021](https://img.shields.io/badge/Rust-C--ABI%20Core-000000?style=flat-square&logo=rust&logoColor=white)](rust-core/)
 [![Swift 5.10+](https://img.shields.io/badge/Swift-5.10%2B-F05138?style=flat-square&logo=swift&logoColor=white)](https://swift.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-34C759?style=flat-square)](LICENSE)
@@ -93,7 +95,7 @@ All real-time DSP stages execute inside [`rust-core/src/dsp.rs`](rust-core/src/d
 - **Rust 1.75+ (`cargo` / `rustc`)** & **Swift 5.10+** (Xcode Command Line Tools are sufficient; full Xcode is not required)
 - **Windows / Linux (`rust-core/` only)**: Compiles and passes `cargo test` natively on Windows & Linux CI targets.
 
-### Build from Source
+### Build macOS (`AudioMatrixHub.app` + `audiomatrix`)
 
 ```bash
 git clone https://github.com/Joooooooooshua/AudioMatrixHub.git
@@ -119,6 +121,19 @@ audiomatrix self-test
 
 # Launch Menu Bar App
 open -a /Applications/AudioMatrixHub.app
+```
+
+### Windows & Linux Desktop GUI (Rust `eframe`)
+
+```bash
+# Build native dark-mode desktop Control Center (`audiomatrix-desktop`) + CLI (`audiomatrix-pc`)
+cargo build --release --manifest-path rust-desktop/Cargo.toml
+
+# Run 6-suite cross-platform audio driver & DSP verification
+./rust-desktop/target/release/audiomatrix-pc self-test
+
+# Launch the native Rust Control Center window (WASAPI on Windows / PipeWire on Linux)
+./rust-desktop/target/release/audiomatrix-desktop
 ```
 
 ---
@@ -166,14 +181,19 @@ AudioMatrixHub/
 ├── .github/workflows/ci.yml              # Multi-OS Rust CI (macOS/Linux/Win) + macOS Swift FFI CI
 ├── scripts/bundle_app.sh                 # Builds Rust Core + Swift binaries + ad-hoc .app bundler
 ├── rust-core/
-│   ├── Cargo.toml                        # Zero-dependency cross-platform C-ABI staticlib crate
+│   ├── Cargo.toml                        # Zero-dependency cross-platform C-ABI & driver crate
 │   └── src/
-│       ├── lib.rs                        # Public C-ABI exports
+│       ├── lib.rs                        # Public C-ABI & Rust exports
 │       ├── dsp.rs                        # AmDspEngine (ITD/ILD, Haas room, ramped EQ, limiter)
 │       ├── ring_buffer.rs                # Lock-free atomic SPSC stereo audio ring buffer
 │       ├── wav.rs                        # 48kHz IEEE Float32 RIFF/WAVE encoder
 │       ├── osc.rs                        # OSC 1.0 slugify & binary encoder/decoder
-│       └── backend.rs                    # AudioPlatformBackend trait (CoreAudio / WASAPI / PipeWire)
+│       └── backend.rs                    # Cross-platform WASAPI / PipeWire / CoreAudio drivers
+├── rust-desktop/
+│   ├── Cargo.toml                        # Cross-platform Windows/Linux/macOS GUI & CLI crate
+│   └── src/
+│       ├── main_gui.rs                   # Native eframe/egui dark Control Center (`audiomatrix-desktop`)
+│       └── main_cli.rs                   # Cross-platform CLI & 6-suite runner (`audiomatrix-pc`)
 └── Sources/
     ├── CAudioMatrixRust/                 # Clang module & C-ABI FFI header bridging libaudiomatrix_rust_core.a
     ├── AudioMatrixCore/

@@ -1,5 +1,7 @@
 .build/
 rust-core/target/
+rust-desktop/target/
+dist/
 .DS_Store
 *.xcuserdata
 *.xcworkspace

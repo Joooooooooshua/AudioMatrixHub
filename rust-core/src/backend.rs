@@ -873,10 +873,16 @@ fn query_os_app_streams(_kind: BackendKind) -> Vec<AppAudioStream> {
     {
         return linux_query_app_streams();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        Vec::new()
+        return windows_query_app_streams();
     }
+    #[cfg(target_os = "macos")]
+    {
+        return Vec::new();
+    }
+    #[allow(unreachable_code)]
+    Vec::new()
 }
 
 fn os_set_default_output(_kind: BackendKind, _id: &str) {
@@ -886,13 +892,7 @@ fn os_set_default_output(_kind: BackendKind, _id: &str) {
     }
     #[cfg(target_os = "windows")]
     {
-        let script = format!(
-            "if (Get-Command Set-AudioDevice -ErrorAction SilentlyContinue) {{ Set-AudioDevice -Index {} | Out-Null }}",
-            _id
-        );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status();
+        windows_run_wasapi(&["set-default", _id]);
     }
     #[cfg(target_os = "macos")]
     {
@@ -907,6 +907,10 @@ fn os_set_default_input(_kind: BackendKind, _id: &str) {
             .args(["set-default-source", _id])
             .status();
     }
+    #[cfg(target_os = "windows")]
+    {
+        windows_run_wasapi(&["set-default", _id]);
+    }
     #[cfg(target_os = "macos")]
     {
         let _ = Command::new("audiomatrix").args(["input", _id]).status();
@@ -920,6 +924,11 @@ fn os_set_device_volume(_kind: BackendKind, _id: &str, _vol: f32) {
         let _ = Command::new("pactl")
             .args(["set-sink-volume", _id, &pct])
             .status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let pct = format!("{}", (_vol * 100.0).round().clamp(0.0, 100.0) as i32);
+        windows_run_wasapi(&["set-volume", _id, &pct]);
     }
     #[cfg(target_os = "macos")]
     {
@@ -938,6 +947,11 @@ fn os_set_app_volume(_kind: BackendKind, _id: &str, _vol: f32) {
             .args(["set-sink-input-volume", _id, &pct])
             .status();
     }
+    #[cfg(target_os = "windows")]
+    {
+        let pct = format!("{}", (_vol * 100.0).round().clamp(0.0, 100.0) as i32);
+        windows_run_wasapi(&["set-app-volume", _id, &pct]);
+    }
 }
 
 fn os_set_app_mute(_kind: BackendKind, _id: &str, _muted: bool) {
@@ -947,6 +961,11 @@ fn os_set_app_mute(_kind: BackendKind, _id: &str, _muted: bool) {
         let _ = Command::new("pactl")
             .args(["set-sink-input-mute", _id, flag])
             .status();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let flag = if _muted { "1" } else { "0" };
+        windows_run_wasapi(&["set-app-mute", _id, flag]);
     }
 }
 
@@ -1239,51 +1258,443 @@ fn linux_toggle_loopback(enabled: bool, include_mic: bool, module_ids: &mut Vec<
 }
 
 #[cfg(target_os = "windows")]
-fn windows_query_devices() -> Vec<PlatformAudioDevice> {
-    let script = "Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name";
-    let Ok(out) = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-    else {
-        return Vec::new();
+const WINDOWS_WASAPI_HELPER_PS1: &str = r#"
+param(
+    [string]$Action,
+    [string]$Arg1 = "",
+    [string]$Arg2 = ""
+)
+
+$code = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace AudioMatrixWasapi {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPERTYKEY {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPVARIANT {
+        public ushort vt;
+        public ushort wReserved1;
+        public ushort wReserved2;
+        public ushort wReserved3;
+        public IntPtr p;
+        public int p2;
+    }
+
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPropertyStore {
+        int GetCount(out int cProps);
+        int GetAt(int iProp, out PROPERTYKEY pkey);
+        int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+        int Commit();
+    }
+
+    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioEndpointVolume {
+        int RegisterControlChangeNotify(IntPtr pNotify);
+        int UnregisterControlChangeNotify(IntPtr pNotify);
+        int GetChannelCount(out uint pnChannelCount);
+        int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
+        int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
+        int GetMasterVolumeLevel(out float pfLevelDB);
+        int GetMasterVolumeLevelScalar(out float pfLevel);
+        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
+        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
+        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+        int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid pguidEventContext);
+        int GetMute([MarshalAs(UnmanagedType.Bool)] out bool pbMute);
+    }
+
+    [ComImport, Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface ISimpleAudioVolume {
+        int SetMasterVolume(float fLevel, ref Guid EventContext);
+        int GetMasterVolume(out float pfLevel);
+        int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid EventContext);
+        int GetMute([MarshalAs(UnmanagedType.Bool)] out bool pbMute);
+    }
+
+    [ComImport, Guid("F4B1A599-7266-4319-A8CA-E70ACB11E8CD"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioSessionControl {
+        int GetState(out int pRetVal);
+        int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        int GetGroupingParam(out Guid pRetVal);
+        int SetGroupingParam(ref Guid Override, ref Guid EventContext);
+        int RegisterAudioSessionNotification(IntPtr NewNotifications);
+        int UnregisterAudioSessionNotification(IntPtr NewNotifications);
+    }
+
+    [ComImport, Guid("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioSessionControl2 {
+        int GetState(out int pRetVal);
+        int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        int GetGroupingParam(out Guid pRetVal);
+        int SetGroupingParam(ref Guid Override, ref Guid EventContext);
+        int RegisterAudioSessionNotification(IntPtr NewNotifications);
+        int UnregisterAudioSessionNotification(IntPtr NewNotifications);
+        int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        int GetProcessId(out uint pRetVal);
+        int IsSystemSoundsSession();
+        int SetDuckingPreference([MarshalAs(UnmanagedType.Bool)] bool optOut);
+    }
+
+    [ComImport, Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioSessionEnumerator {
+        int GetCount(out int SessionCount);
+        int GetSession(int SessionCount, out IAudioSessionControl Session);
+    }
+
+    [ComImport, Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IAudioSessionManager2 {
+        int GetAudioSessionControl(IntPtr AudioSessionGuid, uint StreamFlags, out IAudioSessionControl SessionControl);
+        int GetSimpleAudioVolume(IntPtr AudioSessionGuid, uint StreamFlags, out ISimpleAudioVolume AudioVolume);
+        int GetSessionEnumerator(out IAudioSessionEnumerator SessionEnum);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDevice {
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        int OpenPropertyStore(int stgmAccess, out IPropertyStore ppProperties);
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        int GetState(out int pdwState);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDeviceCollection {
+        int GetCount(out int pcDevices);
+        int Item(int nDevice, out IMMDevice ppDevice);
+    }
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IMMDeviceCollection ppDevices);
+        int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppEndpoint);
+        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string pwstrId, out IMMDevice ppDevice);
+    }
+
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    public class MMDeviceEnumeratorCom {}
+
+    [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPolicyConfig {
+        int GetMixFormat(string pszDeviceName, IntPtr ppFormat);
+        int GetDeviceFormat(string pszDeviceName, bool bDefault, IntPtr ppFormat);
+        int ResetDeviceFormat(string pszDeviceName);
+        int SetDeviceFormat(string pszDeviceName, IntPtr pEndpointFormat, IntPtr mixFormat);
+        int GetProcessingPeriod(string pszDeviceName, bool bDefault, IntPtr pmftDefaultPeriod, IntPtr pmftMinimumPeriod);
+        int SetProcessingPeriod(string pszDeviceName, IntPtr pmftPeriod);
+        int GetShareMode(string pszDeviceName, IntPtr pMode);
+        int SetShareMode(string pszDeviceName, IntPtr mode);
+        int GetPropertyValue(string pszDeviceName, bool bFxStore, IntPtr key, IntPtr pv);
+        int SetPropertyValue(string pszDeviceName, bool bFxStore, IntPtr key, IntPtr pv);
+        int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string pszDeviceName, int role);
+        int SetEndpointVisibility(string pszDeviceName, bool bVisible);
+    }
+
+    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    public class PolicyConfigClientCom {}
+
+    public static class Hub {
+        private static readonly Guid IID_IAudioEndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+        private static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
+
+        private static string GetFriendlyName(IMMDevice dev) {
+            try {
+                IPropertyStore store;
+                if (dev.OpenPropertyStore(0, out store) != 0 || store == null) return "Audio Device";
+                PROPERTYKEY key = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
+                PROPVARIANT pv;
+                if (store.GetValue(ref key, out pv) == 0 && pv.vt == 31 && pv.p != IntPtr.Zero) {
+                    return Marshal.PtrToStringUni(pv.p) ?? "Audio Device";
+                }
+            } catch {}
+            return "Audio Device";
+        }
+
+        private static string GetDefaultId(IMMDeviceEnumerator enumObj, int flow) {
+            try {
+                IMMDevice defDev;
+                if (enumObj.GetDefaultAudioEndpoint(flow, 0, out defDev) == 0 && defDev != null) {
+                    string id;
+                    if (defDev.GetId(out id) == 0) return id ?? "";
+                }
+            } catch {}
+            return "";
+        }
+
+        public static List<string> ListDevices() {
+            var lines = new List<string>();
+            try {
+                var enumObj = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+                string defOut = GetDefaultId(enumObj, 0);
+                string defIn = GetDefaultId(enumObj, 1);
+
+                for (int flow = 0; flow <= 1; flow++) {
+                    IMMDeviceCollection col;
+                    if (enumObj.EnumAudioEndpoints(flow, 1, out col) != 0 || col == null) continue;
+                    int count;
+                    col.GetCount(out count);
+                    for (int i = 0; i < count; i++) {
+                        IMMDevice dev;
+                        if (col.Item(i, out dev) != 0 || dev == null) continue;
+                        string id;
+                        dev.GetId(out id);
+                        string name = GetFriendlyName(dev).Replace("\t", " ");
+                        float vol = 0.75f;
+                        try {
+                            object obj;
+                            Guid iid = IID_IAudioEndpointVolume;
+                            if (dev.Activate(ref iid, 23, IntPtr.Zero, out obj) == 0 && obj != null) {
+                                ((IAudioEndpointVolume)obj).GetMasterVolumeLevelScalar(out vol);
+                            }
+                        } catch {}
+                        string isOut = flow == 0 ? "1" : "0";
+                        string isIn = flow == 1 ? "1" : "0";
+                        string isDefOut = (flow == 0 && id == defOut) ? "1" : "0";
+                        string isDefIn = (flow == 1 && id == defIn) ? "1" : "0";
+                        lines.Add(string.Format("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}",
+                            id, name, isOut, isIn, isDefOut, isDefIn,
+                            vol.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                    }
+                }
+            } catch {}
+            return lines;
+        }
+
+        public static void SetDefault(string id) {
+            try {
+                var pc = (IPolicyConfig)(new PolicyConfigClientCom());
+                pc.SetDefaultEndpoint(id, 0);
+                pc.SetDefaultEndpoint(id, 1);
+                pc.SetDefaultEndpoint(id, 2);
+            } catch {}
+        }
+
+        public static void SetDeviceVolume(string id, float scalar) {
+            try {
+                var enumObj = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+                IMMDevice dev;
+                if (enumObj.GetDevice(id, out dev) == 0 && dev != null) {
+                    object obj;
+                    Guid iid = IID_IAudioEndpointVolume;
+                    if (dev.Activate(ref iid, 23, IntPtr.Zero, out obj) == 0 && obj != null) {
+                        Guid ctx = Guid.Empty;
+                        ((IAudioEndpointVolume)obj).SetMasterVolumeLevelScalar(Math.Max(0f, Math.Min(1f, scalar)), ref ctx);
+                    }
+                }
+            } catch {}
+        }
+
+        public static List<string> ListApps() {
+            var lines = new List<string>();
+            var seenPids = new HashSet<uint>();
+            try {
+                var enumObj = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+                IMMDevice defOut;
+                if (enumObj.GetDefaultAudioEndpoint(0, 0, out defOut) != 0 || defOut == null) return lines;
+                object mgrObj;
+                Guid iid = IID_IAudioSessionManager2;
+                if (defOut.Activate(ref iid, 23, IntPtr.Zero, out mgrObj) != 0 || mgrObj == null) return lines;
+                IAudioSessionEnumerator sessEnum;
+                ((IAudioSessionManager2)mgrObj).GetSessionEnumerator(out sessEnum);
+                int count;
+                sessEnum.GetCount(out count);
+                for (int i = 0; i < count; i++) {
+                    IAudioSessionControl ctrl;
+                    if (sessEnum.GetSession(i, out ctrl) != 0 || ctrl == null) continue;
+                    var ctrl2 = ctrl as IAudioSessionControl2;
+                    var sav = ctrl as ISimpleAudioVolume;
+                    if (ctrl2 == null || sav == null) continue;
+                    if (ctrl2.IsSystemSoundsSession() == 0) continue;
+                    uint pid = 0;
+                    ctrl2.GetProcessId(out pid);
+                    if (pid == 0 || seenPids.Contains(pid)) continue;
+                    seenPids.Add(pid);
+                    string procName = "App " + pid;
+                    try {
+                        var p = Process.GetProcessById((int)pid);
+                        if (!string.IsNullOrEmpty(p.ProcessName)) procName = p.ProcessName;
+                    } catch {}
+                    int state = 0;
+                    ctrl2.GetState(out state);
+                    float vol = 1f;
+                    bool muted = false;
+                    sav.GetMasterVolume(out vol);
+                    sav.GetMute(out muted);
+                    lines.Add(string.Format("{0}\t{1}\t{2}\t{3}\t{4}",
+                        pid, procName.Replace("\t", " "),
+                        vol.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        muted ? "1" : "0",
+                        state == 1 ? "1" : "0"));
+                }
+            } catch {}
+            return lines;
+        }
+
+        public static void SetAppControl(uint pid, float scalar, bool? muteFlag) {
+            try {
+                var enumObj = (IMMDeviceEnumerator)(new MMDeviceEnumeratorCom());
+                IMMDevice defOut;
+                if (enumObj.GetDefaultAudioEndpoint(0, 0, out defOut) != 0 || defOut == null) return;
+                object mgrObj;
+                Guid iid = IID_IAudioSessionManager2;
+                if (defOut.Activate(ref iid, 23, IntPtr.Zero, out mgrObj) != 0 || mgrObj == null) return;
+                IAudioSessionEnumerator sessEnum;
+                ((IAudioSessionManager2)mgrObj).GetSessionEnumerator(out sessEnum);
+                int count;
+                sessEnum.GetCount(out count);
+                Guid ctx = Guid.Empty;
+                for (int i = 0; i < count; i++) {
+                    IAudioSessionControl ctrl;
+                    if (sessEnum.GetSession(i, out ctrl) != 0 || ctrl == null) continue;
+                    var ctrl2 = ctrl as IAudioSessionControl2;
+                    var sav = ctrl as ISimpleAudioVolume;
+                    if (ctrl2 == null || sav == null) continue;
+                    uint spid = 0;
+                    ctrl2.GetProcessId(out spid);
+                    if (spid != pid) continue;
+                    if (muteFlag.HasValue) {
+                        sav.SetMute(muteFlag.Value, ref ctx);
+                    } else {
+                        sav.SetMasterVolume(Math.Max(0f, Math.Min(1f, scalar)), ref ctx);
+                    }
+                }
+            } catch {}
+        }
+    }
+}
+'@
+
+if (-not ("AudioMatrixWasapi.Hub" -as [type])) {
+    Add-Type -TypeDefinition $code -Language CSharp | Out-Null
+}
+
+switch ($Action) {
+    "list-devices" { [AudioMatrixWasapi.Hub]::ListDevices() }
+    "set-default" { [AudioMatrixWasapi.Hub]::SetDefault($Arg1) }
+    "set-volume" { [AudioMatrixWasapi.Hub]::SetDeviceVolume($Arg1, ([float]$Arg2 / 100.0)) }
+    "list-apps" { [AudioMatrixWasapi.Hub]::ListApps() }
+    "set-app-volume" { [AudioMatrixWasapi.Hub]::SetAppControl([uint32]$Arg1, ([float]$Arg2 / 100.0), $null) }
+    "set-app-mute" { [AudioMatrixWasapi.Hub]::SetAppControl([uint32]$Arg1, 1.0, ($Arg2 -eq "1")) }
+}
+"#;
+
+#[cfg(target_os = "windows")]
+fn windows_ensure_wasapi_helper() -> Option<PathBuf> {
+    let path = std::env::temp_dir().join("audiomatrix_wasapi_helper.ps1");
+    if !path.exists() {
+        std::fs::write(&path, WINDOWS_WASAPI_HELPER_PS1).ok()?;
+    }
+    Some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_run_wasapi(args: &[&str]) -> String {
+    let Some(helper) = windows_ensure_wasapi_helper() else {
+        return String::new();
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let names: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if names.is_empty() {
-        return Vec::new();
-    }
+    let helper_str = helper.to_string_lossy().to_string();
+    let mut cmd_args = vec![
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        &helper_str,
+    ];
+    cmd_args.extend_from_slice(args);
+    Command::new("powershell")
+        .args(&cmd_args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_query_devices() -> Vec<PlatformAudioDevice> {
+    let raw = windows_run_wasapi(&["list-devices"]);
     let mut devs = Vec::new();
-    for (idx, name) in names.into_iter().enumerate() {
-        let low = name.to_lowercase();
-        let is_mic_only = low.contains("microphone") || low.contains("mic ");
-        let is_virtual = low.contains("virtual") || low.contains("vb-audio");
-        devs.push(PlatformAudioDevice {
-            id: format!("wasapi-dev-{}", idx),
-            name,
-            transport: if low.contains("usb") {
-                "USB".to_string()
-            } else if low.contains("bluetooth") {
-                "Bluetooth".to_string()
+    for line in raw.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() >= 7 {
+            let id = cols[0].trim().to_string();
+            let name = cols[1].trim().to_string();
+            let low = name.to_lowercase();
+            let is_output = cols[2].trim() == "1";
+            let is_input = cols[3].trim() == "1";
+            let is_default_output = cols[4].trim() == "1";
+            let is_default_input = cols[5].trim() == "1";
+            let volume = cols[6].trim().parse::<f32>().unwrap_or(0.75).clamp(0.0, 1.0);
+            let is_virtual = low.contains("virtual") || low.contains("vb-audio") || low.contains("cable");
+            let transport = if low.contains("usb") {
+                "USB"
+            } else if low.contains("bluetooth") || low.contains("hands-free") {
+                "Bluetooth"
+            } else if is_virtual {
+                "Virtual"
             } else {
-                "WASAPI".to_string()
-            },
-            is_input: is_mic_only || low.contains("mv7"),
-            is_output: !is_mic_only,
-            is_virtual,
-            is_default_input: idx == 0 && (is_mic_only || low.contains("mv7")),
-            is_default_output: idx == 0 && !is_mic_only,
-            volume: 0.75,
-            sample_rate: 48_000.0,
-        });
+                "WASAPI"
+            };
+            devs.push(PlatformAudioDevice {
+                id,
+                name,
+                transport: transport.to_string(),
+                is_input,
+                is_output,
+                is_virtual,
+                is_default_input,
+                is_default_output,
+                volume,
+                sample_rate: 48_000.0,
+            });
+        }
     }
     devs
+}
+
+#[cfg(target_os = "windows")]
+fn windows_query_app_streams() -> Vec<AppAudioStream> {
+    let raw = windows_run_wasapi(&["list-apps"]);
+    let mut apps = Vec::new();
+    for line in raw.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() >= 5 {
+            let pid_str = cols[0].trim().to_string();
+            let pid = pid_str.parse::<u32>().unwrap_or(0);
+            let name = cols[1].trim().to_string();
+            let volume = cols[2].trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 2.0);
+            let is_muted = cols[3].trim() == "1";
+            let is_producing_audio = cols[4].trim() == "1";
+            apps.push(AppAudioStream {
+                id: pid_str,
+                app_name: name.clone(),
+                binary_name: name.to_lowercase(),
+                pid,
+                volume,
+                is_muted,
+                target_device_id: None,
+                is_producing_audio,
+            });
+        }
+    }
+    apps
 }
 
 const CORE_VERSION_CSTR: &[u8] = b"2.0.0\0";

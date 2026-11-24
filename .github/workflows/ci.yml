@@ -34,7 +34,9 @@ jobs:
       - name: Package Linux Release Tarball
         run: |
           mkdir -p dist/linux
-          cp rust-desktop/target/release/audiomatrix-desktop rust-desktop/target/release/audiomatrix-pc README.md README.zh-CN.md LICENSE dist/linux/
+          cp rust-desktop/target/release/audiomatrix-desktop rust-desktop/target/release/audiomatrix-pc scripts/install-linux.sh README.md README.zh-CN.md LICENSE dist/linux/
+          chmod +x dist/linux/install-linux.sh
+          bash dist/linux/install-linux.sh
           tar -czf AudioMatrixHub-v2.0.0-Linux-x64.tar.gz -C dist/linux .
 
       - name: Upload Linux Artifact
@@ -59,15 +61,18 @@ jobs:
       - name: Build Windows Desktop GUI & CLI
         run: cargo build --release --manifest-path rust-desktop/Cargo.toml
 
-      - name: Run cross-platform self-test suite
-        run: .\rust-desktop\target\release\audiomatrix-pc.exe self-test
+      - name: Run cross-platform self-test suite & WASAPI smoke check
+        run: |
+          .\rust-desktop\target\release\audiomatrix-pc.exe self-test
+          .\rust-desktop\target\release\audiomatrix-pc.exe status
 
-      - name: Package Windows Release Zip
+      - name: Package Windows Release Zip & Verify Installer
         run: |
           New-Item -ItemType Directory -Force -Path dist\win | Out-Null
           Copy-Item rust-desktop\target\release\audiomatrix-desktop.exe dist\win\
           Copy-Item rust-desktop\target\release\audiomatrix-pc.exe dist\win\
-          Copy-Item README.md, README.zh-CN.md, LICENSE dist\win\
+          Copy-Item scripts\Install-AudioMatrixHub.bat, scripts\install.ps1, README.md, README.zh-CN.md, LICENSE dist\win\
+          powershell -NoProfile -ExecutionPolicy Bypass -File dist\win\install.ps1
           Compress-Archive -Path dist\win\* -DestinationPath AudioMatrixHub-v2.0.0-Windows-x64.zip -Force
 
       - name: Upload Windows Artifact
